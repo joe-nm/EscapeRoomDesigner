@@ -3,16 +3,24 @@ import './style.css';
 
 type Room = { id: string; name: string; x: number; y: number; w: number; h: number; color: number };
 type Door = { key: string; axis: 'h' | 'v'; x: number; y: number };
+type StartPoint = { x: number; z: number; roomId: string };
 type WallSegment = Door;
-type Plan = { rooms: Room[]; doors: Door[]; selectedId: string | null };
+type Plan = { rooms: Room[]; doors: Door[]; start: StartPoint | null; selectedId: string | null };
+type AppMode = 'build' | 'explore';
 
 const CELL = 1;
 const STORAGE_KEY = 'esd-plan-v1';
 const palette = [0xe8a779, 0x95b5a5, 0x9fadd0, 0xe1c36c, 0xd8969e, 0x81abb3];
-const plan: Plan = { rooms: [], doors: [], selectedId: null };
+const plan: Plan = { rooms: [], doors: [], start: null, selectedId: null };
 let roomCounter = 0;
 let toastTimer = 0;
 const ROOM_SIZE = 5;
+const WALL_HEIGHT = 3;
+const DOOR_HEIGHT = 2.1;
+const PLAYER_RADIUS = 0.22;
+const PLAYER_SPEED = 3.5;
+let activeMode: AppMode = 'build';
+let activeTool: 'rooms' | 'start' = 'rooms';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -20,12 +28,14 @@ app.innerHTML = `
     <header class="topbar">
       <a class="brand" href="#" aria-label="ESD home"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><span>ESD</span></a>
       <div class="project-name"><span class="project-dot"></span><span>Untitled escape room</span><span class="saved-state" id="saved-state">Saved locally</span></div>
+      <nav class="mode-tabs" aria-label="Editor mode"><button class="mode-tab active" id="build-tab">Build</button><button class="mode-tab" id="explore-tab">Explore</button></nav>
       <div class="top-actions"><button class="button button-quiet" id="load-button" title="Load your saved plan">↥ <span>Load</span></button><button class="button button-primary" id="save-button">Save plan <span class="save-icon">⌘ S</span></button></div>
     </header>
     <main class="workspace">
       <aside class="left-rail">
         <div class="rail-head"><span class="eyebrow">BUILD MODE</span><h1>Room layout</h1><p>Sketch the spaces your players will explore.</p></div>
-        <div class="tool-card active"><span class="tool-icon">▦</span><span><strong>Rooms</strong><small>Draw floor plans</small></span><kbd>R</kbd></div>
+        <button class="tool-card active" id="rooms-tool"><span class="tool-icon">▦</span><span><strong>Rooms</strong><small>Click to add a room</small></span><kbd>R</kbd></button>
+        <button class="tool-card" id="start-tool"><span class="tool-icon start-tool-icon">◎</span><span><strong>Start marker</strong><small>Choose player start</small></span></button>
         <div class="tool-divider"></div>
         <div class="section-label">YOUR ROOMS <span id="room-count">0</span></div>
         <div class="room-list" id="room-list"></div>
@@ -33,8 +43,8 @@ app.innerHTML = `
         <div class="rail-bottom"><div class="tip-card"><span class="tip-star">✳</span><div><strong>Door tip</strong><p>Click a wall to add a door. Click the opening again to remove it.</p></div></div></div>
       </aside>
       <section class="editor">
-        <div class="editor-toolbar"><div class="breadcrumb"><span>Escape room</span><span class="crumb-slash">/</span><strong>Floor plan</strong></div><div class="canvas-actions"><span class="canvas-hint"><span class="mouse-icon">⌖</span> Click empty space for a room · click a wall for a door</span><span class="action-divider"></span><button class="icon-button" id="zoom-out" aria-label="Zoom out">−</button><span class="zoom-value" id="zoom-value">100%</span><button class="icon-button" id="zoom-in" aria-label="Zoom in">+</button><button class="icon-button fit-button" id="fit-view" title="Fit rooms to view">⤢</button></div></div>
-        <div class="canvas-wrap" id="canvas-wrap"><div class="canvas-label"><span class="live-dot"></span> TOP-DOWN VIEW <span class="canvas-label-divider">/</span> <span id="dimension-label">1 unit = 1m</span></div><div id="three-root"></div><div class="canvas-empty" id="canvas-empty"><div class="empty-graphic"><span class="empty-sq sq-back"></span><span class="empty-sq sq-front"></span><span class="empty-plus">+</span></div><strong>A blank canvas, full of possibility</strong><span>Click anywhere to place your first square room.</span><button class="button button-dark" id="first-room">Place a room <span>↗</span></button></div><div class="toast" id="toast"></div><div class="scale-note"><span class="scale-line"></span><span>1 m</span></div></div>
+        <div class="editor-toolbar"><div class="breadcrumb"><span id="breadcrumb-root">Escape room</span><span class="crumb-slash">/</span><strong id="breadcrumb-view">Floor plan</strong></div><div class="canvas-actions"><span class="canvas-hint" id="canvas-hint"><span class="mouse-icon">⌖</span> Click empty space for a room · click a wall for a door</span><span class="action-divider"></span><button class="icon-button" id="zoom-out" aria-label="Zoom out">−</button><span class="zoom-value" id="zoom-value">100%</span><button class="icon-button" id="zoom-in" aria-label="Zoom in">+</button><button class="icon-button fit-button" id="fit-view" title="Fit rooms to view">⤢</button></div></div>
+        <div class="canvas-wrap" id="canvas-wrap"><div class="canvas-label"><span class="live-dot"></span><span id="canvas-label-text">TOP-DOWN VIEW</span><span class="canvas-label-divider">/</span><span id="dimension-label">1 unit = 1m</span></div><div id="three-root"></div><div class="canvas-empty" id="canvas-empty"><div class="empty-graphic"><span class="empty-sq sq-back"></span><span class="empty-sq sq-front"></span><span class="empty-plus">+</span></div><strong>A blank canvas, full of possibility</strong><span>Click anywhere to place your first square room.</span><button class="button button-dark" id="first-room">Place a room <span>↗</span></button></div><div class="explore-overlay hidden" id="explore-overlay"><button class="explore-exit" id="explore-exit">↩ Build <kbd>B</kbd></button><div class="explore-message" id="explore-message">Click to look around</div><div class="crosshair" id="crosshair"><i></i><i></i></div><div class="explore-controls"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move <span>·</span> Mouse Look <span>·</span> Esc unlock <span>·</span> B Build</div></div><div class="toast" id="toast"></div><div class="scale-note"><span class="scale-line"></span><span>1 m</span></div></div>
         <footer class="statusbar"><span><i class="status-dot"></i> Auto-save on</span><span id="status-message">Ready when you are</span><span class="status-shortcut"><kbd>Space</kbd> + drag to pan <span class="status-divider">·</span>scroll to zoom</span></footer>
       </section>
       <aside class="right-rail"><div class="panel-head"><div><span class="eyebrow">INSPECTOR</span><h2 id="inspector-title">Room details</h2></div><span class="inspector-glyph">⌗</span></div><div class="inspector-content" id="inspector-content"><div class="inspector-empty"><div class="select-illustration">↖</div><strong>Select a room</strong><span>Choose one on the canvas or in your room list to see its details.</span></div></div></aside>
@@ -44,12 +54,16 @@ app.innerHTML = `
 const mount = document.querySelector<HTMLDivElement>('#three-root')!;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#f6f5f1');
+const exploreScene = new THREE.Scene();
+exploreScene.background = new THREE.Color('#cbd2ce');
 const camera = new THREE.OrthographicCamera(-10, 10, 7, -7, 0.1, 100);
 let viewCenterX = 0;
 let viewCenterZ = 0;
 camera.position.set(0, 25, 0);
 camera.up.set(0, 0, -1);
 camera.lookAt(0, 0, 0);
+const playerCamera = new THREE.PerspectiveCamera(75, 1, 0.05, 250);
+playerCamera.rotation.order = 'YXZ';
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -84,12 +98,39 @@ doorHighlight.position.y = 0.12;
 doorHighlight.visible = false;
 scene.add(doorHighlight);
 let highlightedWallKey = '';
+const startMarker = new THREE.Group();
+const markerRing = new THREE.Mesh(new THREE.RingGeometry(0.26, 0.34, 28), new THREE.MeshBasicMaterial({ color: 0x377b57, side: THREE.DoubleSide }));
+markerRing.rotation.x = -Math.PI / 2;
+markerRing.position.y = 0.13;
+startMarker.add(markerRing);
+const markerArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0.14, 0), 0.72, 0x377b57, 0.2, 0.15);
+startMarker.add(markerArrow);
+const markerLabel = makeLabel('START', true, true);
+markerLabel.position.set(0, 0.15, -0.52);
+markerLabel.scale.set(0.75, 0.18, 1);
+startMarker.add(markerLabel);
+startMarker.visible = false;
+scene.add(startMarker);
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const hit = new THREE.Vector3();
 let spaceHeld = false;
 let panState: { pointerId: number; startX: number; startY: number; centerX: number; centerZ: number } | null = null;
+const pressedKeys = new Set<string>();
+let playerPosition = new THREE.Vector3();
+let playerYaw = 0;
+let playerPitch = 0;
+let animationFrame = 0;
+let previousFrameTime = 0;
+
+const ambient = new THREE.HemisphereLight(0xffffff, 0x686f68, 2.1);
+exploreScene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 1.15);
+sun.position.set(-8, 14, 7);
+exploreScene.add(sun);
+const exploreWorld = new THREE.Group();
+exploreScene.add(exploreWorld);
 
 function resize(): void {
   const width = mount.clientWidth || 1;
@@ -99,11 +140,25 @@ function resize(): void {
   camera.left = -halfH * aspect; camera.right = halfH * aspect;
   camera.top = halfH; camera.bottom = -halfH;
   camera.updateProjectionMatrix();
+  playerCamera.aspect = aspect;
+  playerCamera.updateProjectionMatrix();
   renderer.setSize(width, height);
+  alignCrosshair();
   render();
 }
 
-function render(): void { renderer.render(scene, camera); }
+function render(): void {
+  if (activeMode === 'explore') renderer.render(exploreScene, playerCamera);
+  else renderer.render(scene, camera);
+}
+
+function alignCrosshair(): void {
+  const canvasRect = renderer.domElement.getBoundingClientRect();
+  const wrapRect = document.querySelector('#canvas-wrap')!.getBoundingClientRect();
+  const crosshair = document.querySelector<HTMLDivElement>('#crosshair')!;
+  crosshair.style.left = `${canvasRect.left - wrapRect.left + canvasRect.width / 2}px`;
+  crosshair.style.top = `${canvasRect.top - wrapRect.top + canvasRect.height / 2}px`;
+}
 
 function wallSegments(): WallSegment[] {
   const segments = new Map<string, WallSegment>();
@@ -193,8 +248,81 @@ function rebuildScene(): void {
   }
   if (doorPoints.length) doorLayer.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(doorPoints), new THREE.LineBasicMaterial({ color: 0xa56f4e })));
   if (doorArcPoints.length) doorLayer.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(doorArcPoints), new THREE.LineBasicMaterial({ color: 0xb78a68, transparent: true, opacity: 0.8 })));
+  startMarker.visible = activeMode === 'build' && plan.start !== null;
+  if (plan.start) startMarker.position.set(plan.start.x, 0, plan.start.z);
   document.querySelector('#canvas-empty')!.classList.toggle('hidden', plan.rooms.length > 0);
   render();
+}
+
+function clearGroup(group: THREE.Group): void {
+  for (const child of [...group.children]) {
+    group.remove(child);
+    child.traverse(object => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.Line || object instanceof THREE.LineSegments) {
+        object.geometry.dispose();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.forEach(material => material.dispose());
+      }
+    });
+  }
+}
+
+function roomsBesideWall(segment: WallSegment): { positive: Room | null; negative: Room | null } {
+  let positive: Room | null = null;
+  let negative: Room | null = null;
+  for (const room of plan.rooms) {
+    if (segment.axis === 'h' && segment.x >= room.x && segment.x + 1 <= room.x + room.w) {
+      if (room.y === segment.y) positive = room;
+      if (room.y + room.h === segment.y) negative = room;
+    } else if (segment.axis === 'v' && segment.y >= room.y && segment.y + 1 <= room.y + room.h) {
+      if (room.x === segment.x) positive = room;
+      if (room.x + room.w === segment.x) negative = room;
+    }
+  }
+  return { positive, negative };
+}
+
+function wallFaceMaterials(segment: WallSegment, baseColor: number): THREE.Material[] {
+  const base = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.88 });
+  const { positive, negative } = roomsBesideWall(segment);
+  const tint = (room: Room | null): THREE.Material => room
+    ? new THREE.MeshStandardMaterial({ color: new THREE.Color(room.color).lerp(new THREE.Color(0xffffff), 0.28), roughness: 0.9 })
+    : base;
+  const positiveFace = tint(positive), negativeFace = tint(negative);
+  return segment.axis === 'h'
+    ? [base, base, base, base, positiveFace, negativeFace]
+    : [positiveFace, negativeFace, base, base, base, base];
+}
+
+function rebuildExploreScene(): void {
+  clearGroup(exploreWorld);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(300, 300), new THREE.MeshStandardMaterial({ color: 0x9fa7a0, roughness: 1 }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.12;
+  exploreWorld.add(ground);
+  for (const room of plan.rooms) {
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(room.w, room.h), new THREE.MeshStandardMaterial({ color: room.color, roughness: 0.92, side: THREE.DoubleSide }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(room.x + room.w / 2, 0, room.y + room.h / 2);
+    exploreWorld.add(floor);
+  }
+  const doors = new Set(plan.doors.map(door => door.key));
+  for (const segment of wallSegments()) {
+    if (doors.has(segment.key)) {
+      const headerHeight = WALL_HEIGHT - DOOR_HEIGHT;
+      const header = new THREE.Mesh(
+        new THREE.BoxGeometry(segment.axis === 'h' ? 1 : 0.14, headerHeight, segment.axis === 'h' ? 0.14 : 1), wallFaceMaterials(segment, 0xb9b4a8),
+      );
+      header.position.set(segment.axis === 'h' ? segment.x + 0.5 : segment.x, DOOR_HEIGHT + headerHeight / 2, segment.axis === 'h' ? segment.y : segment.y + 0.5);
+      exploreWorld.add(header);
+      continue;
+    }
+    const wall = new THREE.Mesh(
+      new THREE.BoxGeometry(segment.axis === 'h' ? 1 : 0.14, WALL_HEIGHT, segment.axis === 'h' ? 0.14 : 1), wallFaceMaterials(segment, 0xe0ddd3),
+    );
+    wall.position.set(segment.axis === 'h' ? segment.x + 0.5 : segment.x, WALL_HEIGHT / 2, segment.axis === 'h' ? segment.y : segment.y + 0.5);
+    exploreWorld.add(wall);
+  }
 }
 
 function makeLabel(text: string, selected: boolean, subtle = false): THREE.Sprite {
@@ -240,7 +368,85 @@ function placeRoom(rect: { x: number; y: number; w: number; h: number }): void {
   showToast(`${room.name} added`);
 }
 
+function activateBuildTool(tool: 'rooms' | 'start'): void {
+  activeTool = tool;
+  document.querySelector('#rooms-tool')!.classList.toggle('active', tool === 'rooms');
+  document.querySelector('#start-tool')!.classList.toggle('active', tool === 'start');
+  document.querySelector('#canvas-hint')!.innerHTML = tool === 'rooms'
+    ? '<span class="mouse-icon">⌖</span> Click empty space for a room · click a wall for a door'
+    : '<span class="mouse-icon">◎</span> Click inside a room to set the player start';
+  preview.visible = false;
+  render();
+}
+
+function setMode(mode: AppMode): void {
+  activeMode = mode;
+  document.querySelector('.workspace')!.classList.toggle('exploring', mode === 'explore');
+  document.querySelector('#build-tab')!.classList.toggle('active', mode === 'build');
+  document.querySelector('#explore-tab')!.classList.toggle('active', mode === 'explore');
+  document.querySelector('#breadcrumb-root')!.textContent = mode === 'build' ? 'Escape room' : 'Explore mode';
+  document.querySelector('#breadcrumb-view')!.textContent = mode === 'build' ? 'Floor plan' : 'First person';
+  document.querySelector('#canvas-label-text')!.textContent = mode === 'build' ? 'TOP-DOWN VIEW' : 'FIRST PERSON VIEW';
+  document.querySelector('#dimension-label')!.textContent = mode === 'build' ? '1 unit = 1m' : `walls ${WALL_HEIGHT}m high`;
+  document.querySelector('#canvas-empty')!.classList.toggle('hidden', mode === 'explore' || plan.rooms.length > 0);
+  const overlay = document.querySelector<HTMLDivElement>('#explore-overlay')!;
+  overlay.classList.toggle('hidden', mode !== 'explore');
+  document.querySelector('#explore-message')!.textContent = plan.rooms.length === 0
+    ? 'Place a room in Build mode to explore.'
+    : plan.start ? 'Click to look around' : 'No start marker set · starting in the first room';
+  if (mode === 'explore') {
+    document.exitPointerLock?.();
+    pressedKeys.clear();
+    if (plan.rooms.length) {
+      const startingRoom = plan.rooms.find(room => room.id === plan.start?.roomId) ?? plan.rooms[0]!;
+      playerPosition.set(plan.start?.x ?? startingRoom.x + startingRoom.w / 2, 1.65, plan.start?.z ?? startingRoom.y + startingRoom.h / 2);
+      playerYaw = 0; playerPitch = 0;
+      playerCamera.position.copy(playerPosition);
+      playerCamera.rotation.set(playerPitch, playerYaw, 0);
+      rebuildExploreScene();
+    }
+    previousFrameTime = performance.now();
+    cancelAnimationFrame(animationFrame);
+    animationFrame = requestAnimationFrame(exploreFrame);
+  } else {
+    cancelAnimationFrame(animationFrame);
+    document.exitPointerLock?.();
+    pressedKeys.clear();
+    rebuildScene();
+  }
+  requestAnimationFrame(() => { resize(); alignCrosshair(); });
+  render();
+}
+
+function insideAnyRoom(x: number, z: number): boolean {
+  return plan.rooms.some(room => x >= room.x && x <= room.x + room.w && z >= room.y && z <= room.y + room.h);
+}
+
+function canPlayerOccupy(x: number, z: number): boolean {
+  if (!insideAnyRoom(x, z)) return false;
+  const doorKeys = new Set(plan.doors.map(door => door.key));
+  return !wallSegments().some(segment => !doorKeys.has(segment.key) && wallDistance({ x, z }, segment) < PLAYER_RADIUS);
+}
+
+function exploreFrame(time: number): void {
+  if (activeMode !== 'explore') return;
+  const delta = Math.min((time - previousFrameTime) / 1000, 0.05);
+  previousFrameTime = time;
+  let forward = Number(pressedKeys.has('w') || pressedKeys.has('arrowup')) - Number(pressedKeys.has('s') || pressedKeys.has('arrowdown'));
+  let sideways = Number(pressedKeys.has('d') || pressedKeys.has('arrowright')) - Number(pressedKeys.has('a') || pressedKeys.has('arrowleft'));
+  const magnitude = Math.hypot(forward, sideways);
+  if (magnitude > 0) { forward /= magnitude; sideways /= magnitude; }
+  const moveX = (-Math.sin(playerYaw) * forward + Math.cos(playerYaw) * sideways) * PLAYER_SPEED * delta;
+  const moveZ = (-Math.cos(playerYaw) * forward - Math.sin(playerYaw) * sideways) * PLAYER_SPEED * delta;
+  if (canPlayerOccupy(playerPosition.x + moveX, playerPosition.z)) playerPosition.x += moveX;
+  if (canPlayerOccupy(playerPosition.x, playerPosition.z + moveZ)) playerPosition.z += moveZ;
+  playerCamera.position.copy(playerPosition);
+  render();
+  animationFrame = requestAnimationFrame(exploreFrame);
+}
+
 renderer.domElement.addEventListener('pointerdown', event => {
+  if (activeMode !== 'build') return;
   if (event.button !== 1 && !(event.button === 0 && spaceHeld)) return;
   event.preventDefault();
   panState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, centerX: viewCenterX, centerZ: viewCenterZ };
@@ -250,6 +456,7 @@ renderer.domElement.addEventListener('pointerdown', event => {
   renderer.domElement.setPointerCapture(event.pointerId);
 });
 renderer.domElement.addEventListener('pointermove', event => {
+  if (activeMode !== 'build') return;
   if (panState?.pointerId === event.pointerId) {
     const rect = renderer.domElement.getBoundingClientRect();
     const viewWidth = (camera.right - camera.left) / camera.zoom;
@@ -262,6 +469,11 @@ renderer.domElement.addEventListener('pointermove', event => {
     return;
   }
   const cell = screenToWorld(event); if (!cell) return;
+  if (activeTool === 'start') {
+    highlightWall(null); preview.visible = false;
+    renderer.domElement.style.cursor = 'crosshair';
+    return;
+  }
   const wall = nearestWall({ x: cell.worldX, z: cell.worldZ });
   if (wall) {
     highlightWall(wall);
@@ -276,6 +488,7 @@ renderer.domElement.addEventListener('pointermove', event => {
   else updatePreview(cell);
 });
 renderer.domElement.addEventListener('pointerup', event => {
+  if (activeMode !== 'build') return;
   if (panState?.pointerId === event.pointerId) {
     panState = null;
     renderer.domElement.style.cursor = spaceHeld ? 'grab' : '';
@@ -283,6 +496,19 @@ renderer.domElement.addEventListener('pointerup', event => {
   }
   if (event.button !== 0) return;
   const cell = screenToWorld(event); if (!cell) return;
+  if (activeTool === 'start') {
+    const intersections = raycaster.intersectObjects(roomLayer.children.filter(obj => obj instanceof THREE.Mesh), false);
+    const roomId = intersections[0]?.object.userData.roomId as string | undefined;
+    const room = plan.rooms.find(item => item.id === roomId);
+    if (!room) { showToast('Place the start marker inside a room.'); return; }
+    plan.start = {
+      x: THREE.MathUtils.clamp(cell.worldX, room.x + PLAYER_RADIUS + 0.08, room.x + room.w - PLAYER_RADIUS - 0.08),
+      z: THREE.MathUtils.clamp(cell.worldZ, room.y + PLAYER_RADIUS + 0.08, room.y + room.h - PLAYER_RADIUS - 0.08),
+      roomId: room.id,
+    };
+    markChanged(); rebuildScene(); showToast('Player start set');
+    return;
+  }
   const wall = nearestWall({ x: cell.worldX, z: cell.worldZ });
   if (wall) {
     const existing = plan.doors.findIndex(door => door.key === wall.key);
@@ -297,8 +523,26 @@ renderer.domElement.addEventListener('pointerup', event => {
   preview.visible = false;
   placeRoom({ x: cell.x - Math.floor(ROOM_SIZE / 2), y: cell.y - Math.floor(ROOM_SIZE / 2), w: ROOM_SIZE, h: ROOM_SIZE });
 });
+renderer.domElement.addEventListener('click', () => {
+  if (activeMode !== 'explore' || plan.rooms.length === 0) return;
+  if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
+});
+document.querySelector('#explore-exit')!.addEventListener('click', () => setMode('build'));
+document.addEventListener('pointerlockchange', () => {
+  const overlay = document.querySelector('#explore-overlay')!;
+  const locked = document.pointerLockElement === renderer.domElement;
+  overlay.classList.toggle('locked', locked);
+  if (!locked) pressedKeys.clear();
+});
+window.addEventListener('mousemove', event => {
+  if (activeMode !== 'explore' || document.pointerLockElement !== renderer.domElement) return;
+  playerYaw -= event.movementX * 0.0024;
+  playerPitch = THREE.MathUtils.clamp(playerPitch - event.movementY * 0.0024, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05);
+  playerCamera.rotation.set(playerPitch, playerYaw, 0);
+});
 renderer.domElement.addEventListener('pointercancel', event => { if (panState?.pointerId === event.pointerId) panState = null; });
 renderer.domElement.addEventListener('wheel', event => {
+  if (activeMode !== 'build') return;
   event.preventDefault();
   const before = screenToWorld(event);
   if (!before) return;
@@ -344,7 +588,7 @@ function updateUI(): void {
     input.value = selected.name;
     input.addEventListener('input', () => { selected.name = input.value; rebuildScene(); updateRoomListOnly(); markChanged(); });
     content.querySelectorAll<HTMLButtonElement>('.color-swatch').forEach(button => button.addEventListener('click', () => { selected.color = Number(button.dataset.color); updateUI(); rebuildScene(); markChanged(); }));
-    content.querySelector('#delete-room')!.addEventListener('click', () => { const at = plan.rooms.findIndex(r => r.id === selected.id); plan.rooms.splice(at, 1); const validWallKeys = new Set(wallSegments().map(wall => wall.key)); plan.doors = plan.doors.filter(door => validWallKeys.has(door.key)); plan.selectedId = plan.rooms[Math.max(0, at - 1)]?.id ?? null; markChanged(); updateUI(); rebuildScene(); });
+    content.querySelector('#delete-room')!.addEventListener('click', () => { const at = plan.rooms.findIndex(r => r.id === selected.id); plan.rooms.splice(at, 1); if (plan.start?.roomId === selected.id) plan.start = null; const validWallKeys = new Set(wallSegments().map(wall => wall.key)); plan.doors = plan.doors.filter(door => validWallKeys.has(door.key)); plan.selectedId = plan.rooms[Math.max(0, at - 1)]?.id ?? null; markChanged(); updateUI(); rebuildScene(); });
   }
   rebuildScene();
 }
@@ -373,17 +617,21 @@ function fitView(): void {
 
 function zoom(factor: number): void { camera.zoom = THREE.MathUtils.clamp(camera.zoom * factor, 0.45, 3); camera.updateProjectionMatrix(); render(); document.querySelector('#zoom-value')!.textContent = `${Math.round(camera.zoom * 100)}%`; }
 function markChanged(): void { document.querySelector('#saved-state')!.textContent = 'Unsaved changes'; document.querySelector('#status-message')!.textContent = 'Plan updated'; window.clearTimeout(toastTimer); toastTimer = window.setTimeout(savePlan, 900); }
-function savePlan(): void { localStorage.setItem(STORAGE_KEY, JSON.stringify({ rooms: plan.rooms, doors: plan.doors, selectedId: plan.selectedId, roomCounter })); document.querySelector('#saved-state')!.textContent = 'Saved locally'; document.querySelector('#status-message')!.textContent = 'Saved in this browser'; }
+function savePlan(): void { localStorage.setItem(STORAGE_KEY, JSON.stringify({ rooms: plan.rooms, doors: plan.doors, start: plan.start, selectedId: plan.selectedId, roomCounter })); document.querySelector('#saved-state')!.textContent = 'Saved locally'; document.querySelector('#status-message')!.textContent = 'Saved in this browser'; }
 function loadPlan(): void {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) { showToast('No saved plan in this browser yet.'); return; }
-  try { const data = JSON.parse(raw) as Partial<Plan> & { roomCounter?: number }; if (!Array.isArray(data.rooms)) throw new Error('Invalid plan'); plan.rooms = data.rooms; plan.doors = Array.isArray(data.doors) ? data.doors : []; plan.selectedId = data.selectedId ?? null; roomCounter = data.roomCounter ?? plan.rooms.length; updateUI(); fitView(); showToast('Your saved plan is ready.'); }
+  try { const data = JSON.parse(raw) as Partial<Plan> & { roomCounter?: number }; if (!Array.isArray(data.rooms)) throw new Error('Invalid plan'); plan.rooms = data.rooms; plan.doors = Array.isArray(data.doors) ? data.doors : []; plan.start = data.start ?? null; plan.selectedId = data.selectedId ?? null; roomCounter = data.roomCounter ?? plan.rooms.length; updateUI(); fitView(); showToast('Your saved plan is ready.'); }
   catch { showToast('That saved plan couldn’t be opened.'); }
 }
 function showToast(message: string): void { const toast = document.querySelector<HTMLDivElement>('#toast')!; toast.textContent = message; toast.classList.add('visible'); window.setTimeout(() => toast.classList.remove('visible'), 2200); }
 
 document.querySelector('#save-button')!.addEventListener('click', savePlan);
 document.querySelector('#load-button')!.addEventListener('click', loadPlan);
+document.querySelector('#build-tab')!.addEventListener('click', () => setMode('build'));
+document.querySelector('#explore-tab')!.addEventListener('click', () => setMode('explore'));
+document.querySelector('#rooms-tool')!.addEventListener('click', () => activateBuildTool('rooms'));
+document.querySelector('#start-tool')!.addEventListener('click', () => activateBuildTool('start'));
 document.querySelector('#zoom-in')!.addEventListener('click', () => zoom(1.18));
 document.querySelector('#zoom-out')!.addEventListener('click', () => zoom(1 / 1.18));
 document.querySelector('#fit-view')!.addEventListener('click', fitView);
@@ -391,10 +639,19 @@ document.querySelector('#first-room')!.addEventListener('click', () => showToast
 window.addEventListener('keydown', event => {
   const target = event.target;
   const typing = target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+  if (activeMode === 'build' && !typing && event.key.toLowerCase() === 'r') activateBuildTool('rooms');
+  if (activeMode === 'explore' && !typing && ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(event.key.toLowerCase())) {
+    pressedKeys.add(event.key.toLowerCase()); event.preventDefault();
+  }
+  if (activeMode === 'explore' && !typing && event.key.toLowerCase() === 'b') { setMode('build'); event.preventDefault(); return; }
   if (event.code === 'Space' && !typing) { spaceHeld = true; renderer.domElement.style.cursor = 'grab'; event.preventDefault(); }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); savePlan(); }
 });
-window.addEventListener('keyup', event => { if (event.code === 'Space') { spaceHeld = false; renderer.domElement.style.cursor = ''; } });
+window.addEventListener('keyup', event => {
+  if (event.code === 'Space') { spaceHeld = false; renderer.domElement.style.cursor = ''; }
+  pressedKeys.delete(event.key.toLowerCase());
+});
 window.addEventListener('blur', () => { spaceHeld = false; panState = null; renderer.domElement.style.cursor = ''; });
 window.addEventListener('resize', resize);
+new ResizeObserver(resize).observe(mount);
 resize(); updateUI(); loadPlan();
